@@ -1,0 +1,10 @@
+fastapi==0.115.0
+uvicorn[standard]==0.31.1
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+python-jobspy==1.1.80
+apscheduler==3.10.4
+pydantic==2.9.2
+pandas==2.2.3
+pdfplumber==0.11.4
+python-multipart==0.0.12
