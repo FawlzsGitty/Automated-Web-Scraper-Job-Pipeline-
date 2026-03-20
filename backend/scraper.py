@@ -3,9 +3,10 @@ Job listing aggregator — wraps python-jobspy, normalizes, deduplicates,
 filters against the user profile, and persists to the DB.
 
 Column name conventions:
-  - JobSpy returns UPPERCASE column names (TITLE, COMPANY, SITE, …).
+  - JobSpy column names are normalized to lowercase immediately after fetch.
   - We map them to snake_case DB columns on insert.
-  - Never assume `is_remote` exists in the DataFrame — infer it here.
+  - `is_remote` may exist in newer JobSpy versions; we use it if present,
+    otherwise infer it from available text fields.
 """
 
 from __future__ import annotations
@@ -27,35 +28,55 @@ from models import JobListing, JobStatus, UserProfile
 
 logger = logging.getLogger(__name__)
 
-HOURLY_TO_ANNUAL = 2080      # standard full-time hours per year
-MAX_ATTEMPTS     = 3         # escalate to NEEDS_REVIEW after this many retries
+HOURLY_TO_ANNUAL = 2080   # standard full-time hours per year
+MAX_ATTEMPTS     = 3      # escalate to NEEDS_REVIEW after this many retries
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _safe_str(val) -> str:
+    """Convert a value to string, returning '' for None/NaN."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(val)
+
 
 def _combine_location(row: pd.Series) -> str:
-    city  = str(row.get("CITY",  "") or "").strip()
-    state = str(row.get("STATE", "") or "").strip()
+    """Combine city + state into a single location string (lowercase columns)."""
+    city  = _safe_str(row.get("city",  "")).strip()
+    state = _safe_str(row.get("state", "")).strip()
     if city and state:
         return f"{city}, {state}"
     return city or state or ""
 
 
-def _normalize_salary(amount: Optional[float], interval: str) -> Optional[float]:
-    if amount is None or pd.isna(amount):
+def _normalize_salary(amount, interval: str) -> Optional[float]:
+    if amount is None:
         return None
+    try:
+        if pd.isna(amount):
+            return None
+    except (TypeError, ValueError):
+        pass
     return float(amount) * HOURLY_TO_ANNUAL if interval == "hourly" else float(amount)
 
 
 def _infer_remote(row: pd.Series) -> bool:
     """
-    JobSpy has no `is_remote` column.
-    Infer by checking JOB_TYPE or CITY/STATE for the word "remote".
+    Infer remote status from text fields (lowercase column names).
+    Checks title, city, state, job_type, and the first 500 chars of description.
     """
     text = " ".join([
-        str(row.get("JOB_TYPE", "") or ""),
-        str(row.get("CITY",     "") or ""),
-        str(row.get("STATE",    "") or ""),
+        _safe_str(row.get("job_type")),
+        _safe_str(row.get("city")),
+        _safe_str(row.get("state")),
+        _safe_str(row.get("title")),
+        _safe_str(row.get("description"))[:500],
     ]).lower()
     return "remote" in text
 
@@ -74,27 +95,32 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
 
     Returns the number of new listings inserted.
     """
-    search_terms = ", ".join(profile.job_titles) if profile.job_titles else ""
-    location     = profile.city or ""
+    job_titles = profile.job_titles or []
+    location   = profile.city or ""
 
-    # ── 1. Fetch from JobSpy ─────────────────────────────────────────────────
+    if not job_titles:
+        logger.warning("No job titles on profile — skipping scrape.")
+        return 0
+
+    # ── 1. Fetch from JobSpy — one query per job title per site ──────────────
     df_parts: list[pd.DataFrame] = []
 
-    for site in ("indeed", "linkedin"):
-        try:
-            part = jobspy.scrape_jobs(
-                site_name      = site,
-                search_term    = search_terms,
-                location       = location,
-                results_wanted = 50,
-                hours_old      = 72,
-            )
-            if part is not None and not part.empty:
-                df_parts.append(part)
-                logger.info("Fetched %d listings from %s", len(part), site)
-        except Exception as exc:
-            # LinkedIn rate limits are expected — continue with other sources
-            logger.warning("Skipping %s due to error: %s", site, exc)
+    for title in job_titles:
+        for site in ("indeed", "linkedin"):
+            try:
+                part = jobspy.scrape_jobs(
+                    site_name      = site,
+                    search_term    = title,
+                    location       = location,
+                    results_wanted = 25,
+                    hours_old      = 168,  # 7 days
+                    is_remote      = (profile.work_arrangements == ["remote"]),
+                )
+                if part is not None and not part.empty:
+                    df_parts.append(part)
+                    logger.info("Fetched %d listings for %r from %s", len(part), title, site)
+            except Exception as exc:
+                logger.warning("Skipping %s / %r due to error: %s", site, title, exc)
 
     if not df_parts:
         logger.warning("No listings returned from any source.")
@@ -102,23 +128,41 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
 
     df = pd.concat(df_parts, ignore_index=True)
 
+    # Normalize all column names to lowercase immediately — jobspy may return
+    # either lowercase or uppercase depending on the installed version.
+    df.columns = [c.lower() for c in df.columns]
+    logger.debug("DataFrame columns after fetch: %s", df.columns.tolist())
+
     # ── 2. Normalize ─────────────────────────────────────────────────────────
-    interval_col = df.get("INTERVAL", pd.Series([""] * len(df)))
-    df["pay_interval"] = interval_col.fillna("").str.lower()
-    df["location"]     = df.apply(_combine_location, axis=1)
-    df["is_remote"]    = df.apply(_infer_remote, axis=1)
+    interval_col   = df["interval"] if "interval" in df.columns else pd.Series([""] * len(df))
+    df["pay_interval"] = interval_col.fillna("").astype(str).str.lower()
+
+    # Location: use existing column if present, fill blanks with city+state
+    if "location" in df.columns:
+        df["location"] = df["location"].apply(lambda v: _safe_str(v).strip())
+        blank_mask = df["location"] == ""
+        if blank_mask.any():
+            df.loc[blank_mask, "location"] = df[blank_mask].apply(_combine_location, axis=1)
+    else:
+        df["location"] = df.apply(_combine_location, axis=1)
+
+    # is_remote: use existing column if present (newer jobspy versions supply it)
+    if "is_remote" in df.columns:
+        df["is_remote"] = df["is_remote"].fillna(False).astype(bool)
+    else:
+        df["is_remote"] = df.apply(_infer_remote, axis=1)
 
     df["salary_min"] = df.apply(
-        lambda r: _normalize_salary(r.get("MIN_AMOUNT"), r["pay_interval"]), axis=1
+        lambda r: _normalize_salary(r.get("min_amount"), r["pay_interval"]), axis=1
     )
     df["salary_max"] = df.apply(
-        lambda r: _normalize_salary(r.get("MAX_AMOUNT"), r["pay_interval"]), axis=1
+        lambda r: _normalize_salary(r.get("max_amount"), r["pay_interval"]), axis=1
     )
 
     df["listing_hash"] = df.apply(
         lambda r: _listing_hash(
-            str(r.get("TITLE",   "") or ""),
-            str(r.get("COMPANY", "") or ""),
+            _safe_str(r.get("title")),
+            _safe_str(r.get("company")),
             r["location"],
         ),
         axis=1,
@@ -130,15 +174,24 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
         mask_has_salary = df["salary_min"].notna()
         mask_meets_min  = df["salary_min"] >= profile.min_salary
         df = df[~mask_has_salary | mask_meets_min]
-        logger.debug("After salary filter: %d listings", len(df))
+        logger.info("Salary filter (min $%s/yr): %d listings remain", profile.min_salary, len(df))
 
-    if profile.remote_preference:
-        want_remote = profile.remote_preference == "remote"
-        # Only apply if is_remote can be inferred (don't blindly drop)
-        df = df[df["is_remote"] == want_remote]
-        logger.debug("After remote filter: %d listings", len(df))
+    prefs  = set(profile.work_arrangements or ["hybrid"])
+    before = len(df)
+    if "hybrid" not in prefs:
+        if prefs == {"remote"}:
+            df = df[df["is_remote"] == True]
+        elif prefs == {"onsite"}:
+            df = df[df["is_remote"] == False]
+    logger.info("Remote filter %s: %d → %d listings", prefs, before, len(df))
 
-    # ── 4. Deduplicate against DB ─────────────────────────────────────────────
+    # ── 4. Drop blank rows and deduplicate ────────────────────────────────────
+    # Rows with no title, company, or location all hash identically — remove them.
+    blank_hash = _listing_hash("", "", "")
+    df = df[df["listing_hash"] != blank_hash]
+    df = df.drop_duplicates(subset=["listing_hash"])
+
+    # ── 5. Deduplicate against DB ─────────────────────────────────────────────
     known_hashes = {
         h for (h,) in db.query(JobListing.listing_hash).filter(
             JobListing.listing_hash.in_(df["listing_hash"].tolist())
@@ -146,30 +199,31 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
     }
 
     new_rows = df[~df["listing_hash"].isin(known_hashes)]
-    logger.debug(
+    logger.info(
         "Dedup: %d total, %d already known, %d new",
         len(df), len(known_hashes), len(new_rows),
     )
 
-    # ── 5. Persist ────────────────────────────────────────────────────────────
+    # ── 6. Persist ────────────────────────────────────────────────────────────
     inserted = 0
     for _, row in new_rows.iterrows():
-        # Parse posted_at safely
         posted_at: Optional[datetime] = None
-        if "date_posted" in row and row["date_posted"] and not pd.isna(row.get("date_posted")):
+        raw_date = row.get("date_posted")
+        if raw_date is not None:
             try:
-                posted_at = pd.to_datetime(row["date_posted"]).to_pydatetime()
+                if not pd.isna(raw_date):
+                    posted_at = pd.to_datetime(raw_date).to_pydatetime()
             except Exception:
                 pass
 
         listing = JobListing(
-            source_url      = str(row.get("JOB_URL",      "") or ""),
-            source_platform = str(row.get("SITE",         "") or ""),
-            title           = str(row.get("TITLE",        "") or ""),
-            company         = str(row.get("COMPANY",      "") or ""),
+            source_url      = _safe_str(row.get("job_url")),
+            source_platform = _safe_str(row.get("site")),
+            title           = _safe_str(row.get("title")),
+            company         = _safe_str(row.get("company")),
             location        = row["location"],
-            description     = str(row.get("DESCRIPTION",  "") or ""),
-            job_type        = str(row.get("JOB_TYPE",     "") or ""),
+            description     = _safe_str(row.get("description"))[:50_000],
+            job_type        = _safe_str(row.get("job_type")),
             is_remote       = bool(row["is_remote"]),
             salary_min      = row["salary_min"],
             salary_max      = row["salary_max"],
@@ -179,8 +233,13 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
             status          = JobStatus.PENDING,
             # careers_url left NULL — populated by Step 04
         )
-        db.add(listing)
-        inserted += 1
+        try:
+            db.add(listing)
+            db.flush()
+            inserted += 1
+        except Exception as exc:
+            db.rollback()
+            logger.debug("Skipping duplicate listing (%s): %s", row.get("title"), exc)
 
     db.commit()
     logger.info("Inserted %d new listings.", inserted)

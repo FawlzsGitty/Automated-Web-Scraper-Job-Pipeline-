@@ -1,138 +1,204 @@
-import { useCallback, useState } from "react";
-import { FormProvider, useForm } from "react-hook-form";
+import { useState } from "react";
+import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import axios from "axios";
 
-import {
-  profileSchema,
-  ProfileFormValues,
-  STEP_FIELDS,
-  step1Schema,
-  step2Schema,
-  step3Schema,
-} from "../../schemas/profileSchema";
-import { useWizardDraft } from "../../hooks/useWizardDraft";
+import { profileSchema, ProfileFormValues } from "../../schemas/profileSchema";
 import { useToast } from "../ui/Toast";
-import { ProgressIndicator } from "./ProgressIndicator";
-import { Step1Industry } from "./Step1Industry";
-import { Step2Preferences } from "./Step2Preferences";
-import { Step3DealBreakers } from "./Step3DealBreakers";
 
-const STEPS = ["Target Role", "Preferences", "Deal-Breakers"];
-
-// Per-step resolvers used only for pre-advance validation
-const STEP_RESOLVERS = [
-  zodResolver(step1Schema),
-  zodResolver(step2Schema),
-  zodResolver(step3Schema),
+const ARRANGEMENTS: { value: "remote" | "hybrid" | "onsite"; label: string }[] = [
+  { value: "remote", label: "Remote" },
+  { value: "hybrid", label: "Hybrid" },
+  { value: "onsite", label: "On-site" },
 ];
 
-const DEFAULT_VALUES: Partial<ProfileFormValues> = {
-  industry: "",
-  jobTitles: [],
-  city: "",
-  isRemote: false,
-  minSalary: null,
-  companySizeMin: null,
-  companySizeMax: null,
-  dealBreakers: "",
-};
-
 export function ProfileWizard() {
-  const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [titleInput, setTitleInput] = useState("");
   const { addToast } = useToast();
-
-  const methods = useForm<ProfileFormValues>({
-    resolver: zodResolver(profileSchema),
-    defaultValues: DEFAULT_VALUES as ProfileFormValues,
-    mode: "onChange",
-  });
 
   const {
     control,
     handleSubmit,
-    trigger,
-    getValues,
-    reset,
+    setValue,
+    watch,
     formState: { errors },
-  } = methods;
+  } = useForm<ProfileFormValues>({
+    resolver: zodResolver(profileSchema),
+    defaultValues: {
+      jobTitles: [],
+      city: "",
+      workArrangements: ["hybrid"],
+      minSalary: null,
+    },
+  });
 
-  const { saveDraft, clearDraft } = useWizardDraft(getValues, reset);
+  const jobTitles = watch("jobTitles") ?? [];
+  const workArrangements = watch("workArrangements") ?? [];
 
-  // Validate only the current step's fields before advancing
-  const handleNext = useCallback(async () => {
-    const fields = STEP_FIELDS[step] as readonly (keyof ProfileFormValues)[];
-    const valid = await trigger(fields as (keyof ProfileFormValues)[]);
-    if (!valid) return;
-    saveDraft();
-    setStep((s) => s + 1);
-  }, [step, trigger, saveDraft]);
+  const addTitle = () => {
+    const trimmed = titleInput.trim();
+    if (!trimmed || jobTitles.includes(trimmed)) return;
+    setValue("jobTitles", [...jobTitles, trimmed], { shouldValidate: true });
+    setTitleInput("");
+  };
 
-  const handleBack = () => {
-    saveDraft();
-    setStep((s) => s - 1);
+  const removeTitle = (t: string) =>
+    setValue("jobTitles", jobTitles.filter((x) => x !== t), { shouldValidate: true });
+
+  const toggleArrangement = (val: "remote" | "hybrid" | "onsite") => {
+    const updated = workArrangements.includes(val)
+      ? workArrangements.filter((x) => x !== val)
+      : [...workArrangements, val];
+    setValue("workArrangements", updated, { shouldValidate: true });
   };
 
   const onSubmit = async (data: ProfileFormValues) => {
     setSubmitting(true);
     try {
       await axios.post("/api/profile", data);
-      clearDraft();
-      addToast("Profile saved successfully!", "success");
+      addToast("Profile saved! Scraping jobs now…", "success");
     } catch {
-      addToast("Failed to save profile. Please try again.", "error");
+      addToast("Failed to save profile.", "error");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const stepProps = { control, errors };
-
   return (
-    <FormProvider {...methods}>
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 max-w-lg w-full">
-        <h2 className="text-xl font-semibold text-gray-900 mb-6">
-          Job Search Profile
-        </h2>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 max-w-lg w-full">
+      <h2 className="text-xl font-semibold text-gray-900 mb-6">Job Search Profile</h2>
 
-        <ProgressIndicator currentStep={step} steps={STEPS} />
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-5">
 
-        <form onSubmit={handleSubmit(onSubmit)} noValidate>
-          {step === 0 && <Step1Industry {...stepProps} />}
-          {step === 1 && <Step2Preferences {...stepProps} />}
-          {step === 2 && <Step3DealBreakers {...stepProps} />}
-
-          <div className="flex justify-between mt-8 pt-4 border-t border-gray-100">
+        {/* Job Titles */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Target Job Titles <span className="text-red-500">*</span>
+          </label>
+          <div className="flex flex-wrap gap-2 mb-2">
+            {jobTitles.map((t) => (
+              <span
+                key={t}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-blue-100 text-blue-800 text-xs font-medium"
+              >
+                {t}
+                <button
+                  type="button"
+                  onClick={() => removeTitle(t)}
+                  className="hover:text-blue-600 leading-none"
+                  aria-label={`Remove ${t}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={titleInput}
+              onChange={(e) => setTitleInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); addTitle(); }
+              }}
+              placeholder="e.g. Software Engineer"
+              className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
             <button
               type="button"
-              onClick={handleBack}
-              disabled={step === 0}
-              className="px-4 py-2 text-sm font-medium text-gray-600 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={addTitle}
+              className="px-3 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
             >
-              Back
+              Add
             </button>
-
-            {step < STEPS.length - 1 ? (
-              <button
-                type="button"
-                onClick={handleNext}
-                className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-              >
-                Next
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={submitting}
-                className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-60"
-              >
-                {submitting ? "Saving…" : "Save Profile"}
-              </button>
-            )}
           </div>
-        </form>
-      </div>
-    </FormProvider>
+          {errors.jobTitles && (
+            <p className="mt-1 text-xs text-red-600">
+              {errors.jobTitles.message ?? (errors.jobTitles as { root?: { message?: string } }).root?.message}
+            </p>
+          )}
+        </div>
+
+        {/* Location */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Location</label>
+          <Controller
+            name="city"
+            control={control}
+            render={({ field }) => (
+              <input
+                {...field}
+                type="text"
+                placeholder="e.g. Austin, TX"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            )}
+          />
+        </div>
+
+        {/* Work Arrangement */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Work Arrangement <span className="text-red-500">*</span>
+          </label>
+          <div className="flex gap-3">
+            {ARRANGEMENTS.map(({ value, label }) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => toggleArrangement(value)}
+                className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${
+                  workArrangements.includes(value)
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-white text-gray-600 border-gray-300 hover:border-blue-400"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {errors.workArrangements && (
+            <p className="mt-1 text-xs text-red-600">{errors.workArrangements.message}</p>
+          )}
+        </div>
+
+        {/* Min Salary */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Minimum Salary <span className="text-gray-400 font-normal">(annual, optional)</span>
+          </label>
+          <Controller
+            name="minSalary"
+            control={control}
+            render={({ field }) => (
+              <div className="relative">
+                <span className="absolute left-3 top-2.5 text-gray-400 text-sm">$</span>
+                <input
+                  type="number"
+                  value={field.value ?? ""}
+                  onChange={(e) =>
+                    field.onChange(e.target.value === "" ? null : Number(e.target.value))
+                  }
+                  placeholder="e.g. 80000"
+                  className="w-full rounded-md border border-gray-300 pl-7 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            )}
+          />
+          {errors.minSalary && (
+            <p className="mt-1 text-xs text-red-600">{errors.minSalary.message}</p>
+          )}
+        </div>
+
+        <button
+          type="submit"
+          disabled={submitting}
+          className="w-full py-2.5 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-60"
+        >
+          {submitting ? "Saving…" : "Save Profile"}
+        </button>
+      </form>
+    </div>
   );
 }

@@ -51,18 +51,13 @@ class JobStatus(str, PyEnum):
 class UserProfile(Base):
     __tablename__ = "user_profiles"
 
-    id               = Column(Integer, primary_key=True)
-    industry         = Column(String(200), nullable=False)
-    job_titles       = Column(JSON, nullable=False)          # list[str]
-    city             = Column(String(200))
-    is_remote        = Column(Boolean, default=False)
-    remote_preference = Column(String(50))                   # remote/onsite/hybrid
-    min_salary       = Column(Integer)
-    company_size_min = Column(Integer)
-    company_size_max = Column(Integer)
-    deal_breakers    = Column(Text)
-    created_at       = Column(DateTime, default=datetime.utcnow)
-    updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id                 = Column(Integer, primary_key=True)
+    job_titles         = Column(JSON, nullable=False)          # list[str]
+    city               = Column(String(200))
+    work_arrangements  = Column(JSON, default=list)            # ["remote","hybrid","onsite"]
+    min_salary         = Column(Integer)
+    created_at         = Column(DateTime, default=datetime.utcnow)
+    updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class UserResume(Base):

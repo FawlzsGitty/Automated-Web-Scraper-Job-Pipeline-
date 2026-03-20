@@ -86,19 +86,18 @@ app.add_middleware(
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class ProfileIn(BaseModel):
-    industry:          str
-    jobTitles:         List[str]           = Field(min_length=1)
-    city:              Optional[str]       = None
-    isRemote:          bool                = False
-    remotePreference:  str                 = "onsite"  # remote/hybrid/onsite
-    minSalary:         Optional[int]       = None
-    companySizeMin:    Optional[int]       = None
-    companySizeMax:    Optional[int]       = None
-    dealBreakers:      Optional[str]       = None
+    jobTitles:          List[str]           = Field(min_length=1)
+    city:               Optional[str]       = None
+    workArrangements:   List[str]           = Field(default=["hybrid"])  # ["remote","hybrid","onsite"]
+    minSalary:          Optional[int]       = None
 
 
-class ProfileOut(ProfileIn):
-    id: int
+class ProfileOut(BaseModel):
+    id:                int
+    jobTitles:         List[str]
+    city:              Optional[str]
+    workArrangements:  List[str]
+    minSalary:         Optional[int]
 
     class Config:
         from_attributes = True
@@ -151,24 +150,24 @@ def create_or_update_profile(data: ProfileIn, db: Session = Depends(get_db)):
                 setattr(profile, snake, value)
     else:
         profile = UserProfile(
-            industry          = data.industry,
-            job_titles        = data.jobTitles,
-            city              = data.city,
-            is_remote         = data.isRemote,
-            remote_preference = data.remotePreference,
-            min_salary        = data.minSalary,
-            company_size_min  = data.companySizeMin,
-            company_size_max  = data.companySizeMax,
-            deal_breakers     = data.dealBreakers,
+            job_titles         = data.jobTitles,
+            city               = data.city,
+            work_arrangements  = data.workArrangements,
+            min_salary         = data.minSalary,
         )
         db.add(profile)
 
     db.commit()
     db.refresh(profile)
 
-    # Trigger an immediate scrape with the new profile
+    # Trigger an immediate scrape on a fresh session so a scrape error
+    # never rolls back the profile transaction above.
     try:
-        scrape_and_persist(profile, db)
+        scrape_db = SessionLocal()
+        try:
+            scrape_and_persist(profile, scrape_db)
+        finally:
+            scrape_db.close()
     except Exception as exc:
         logger.warning("Post-profile scrape failed: %s", exc)
 
@@ -338,16 +337,11 @@ def _to_snake(name: str) -> str:
 
 def _profile_to_out(p: UserProfile) -> dict:
     return {
-        "id":               p.id,
-        "industry":         p.industry,
-        "jobTitles":        p.job_titles or [],
-        "city":             p.city,
-        "isRemote":         p.is_remote,
-        "remotePreference": p.remote_preference,
-        "minSalary":        p.min_salary,
-        "companySizeMin":   p.company_size_min,
-        "companySizeMax":   p.company_size_max,
-        "dealBreakers":     p.deal_breakers,
+        "id":                p.id,
+        "jobTitles":         p.job_titles or [],
+        "city":              p.city,
+        "workArrangements":  p.work_arrangements or [],
+        "minSalary":         p.min_salary,
     }
 
 
