@@ -88,8 +88,9 @@ app.add_middleware(
 class ProfileIn(BaseModel):
     jobTitles:          List[str]           = Field(min_length=1)
     city:               Optional[str]       = None
-    workArrangements:   List[str]           = Field(default=["hybrid"])  # ["remote","hybrid","onsite"]
+    workArrangements:   List[str]           = Field(default=["hybrid"])
     minSalary:          Optional[int]       = None
+    targetCompanies:    List[str]           = Field(default_factory=list)
 
 
 class ProfileOut(BaseModel):
@@ -131,6 +132,7 @@ class ListingOut(BaseModel):
     source_platform: Optional[str]
     status:          str
     posted_at:       Optional[str]
+    target_company:  Optional[str]   # non-null when found via targeted company search
 
     class Config:
         from_attributes = True
@@ -150,10 +152,11 @@ def create_or_update_profile(data: ProfileIn, db: Session = Depends(get_db)):
                 setattr(profile, snake, value)
     else:
         profile = UserProfile(
-            job_titles         = data.jobTitles,
-            city               = data.city,
-            work_arrangements  = data.workArrangements,
-            min_salary         = data.minSalary,
+            job_titles        = data.jobTitles,
+            city              = data.city,
+            work_arrangements = data.workArrangements,
+            min_salary        = data.minSalary,
+            target_companies  = data.targetCompanies,
         )
         db.add(profile)
 
@@ -320,11 +323,40 @@ def get_listings(
             raise HTTPException(status_code=400, detail=f"Unknown status: {status}")
         query = query.filter(JobListing.status == job_status)
 
-    total   = query.count()
-    offset  = (page - 1) * page_size
-    listings = query.order_by(JobListing.created_at.desc()).offset(offset).limit(page_size).all()
+    listings = query.order_by(JobListing.created_at.desc()).all()
+
+    # Sort by resume relevance if a resume exists — resume never filters,
+    # only re-ranks so all matching jobs remain visible.
+    resume = db.query(UserResume).filter_by(user_id=1).first()
+    if resume:
+        keywords = _resume_keywords(resume)
+        listings = sorted(listings, key=lambda l: _relevance_score(l, keywords), reverse=True)
+
+    offset = (page - 1) * page_size
+    listings = listings[offset : offset + page_size]
 
     return [_listing_to_out(l) for l in listings]
+
+
+def _resume_keywords(resume: UserResume) -> set[str]:
+    """Extract lowercase keyword tokens from resume skills and job titles."""
+    keywords: set[str] = set()
+    for skill in (resume.skills or []):
+        keywords.add(str(skill).lower().strip())
+    for exp in (resume.experience or []):
+        if isinstance(exp, dict):
+            title = str(exp.get("title", "") or "").lower().strip()
+            if title:
+                keywords.add(title)
+    return keywords
+
+
+def _relevance_score(listing: JobListing, keywords: set[str]) -> int:
+    """Count how many resume keywords appear in the listing title + description."""
+    if not keywords:
+        return 0
+    haystack = f"{listing.title or ''} {listing.description or ''}".lower()
+    return sum(1 for kw in keywords if kw and kw in haystack)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -337,11 +369,12 @@ def _to_snake(name: str) -> str:
 
 def _profile_to_out(p: UserProfile) -> dict:
     return {
-        "id":                p.id,
-        "jobTitles":         p.job_titles or [],
-        "city":              p.city,
-        "workArrangements":  p.work_arrangements or [],
-        "minSalary":         p.min_salary,
+        "id":               p.id,
+        "jobTitles":        p.job_titles or [],
+        "city":             p.city,
+        "workArrangements": p.work_arrangements or [],
+        "minSalary":        p.min_salary,
+        "targetCompanies":  p.target_companies or [],
     }
 
 
@@ -360,4 +393,5 @@ def _listing_to_out(l: JobListing) -> dict:
         "source_platform": l.source_platform,
         "status":          l.status.value if l.status else "pending",
         "posted_at":       l.posted_at.isoformat() if l.posted_at else None,
+        "target_company":  l.target_company,
     }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import axios from "axios";
@@ -15,7 +15,10 @@ const ARRANGEMENTS: { value: "remote" | "hybrid" | "onsite"; label: string }[] =
 export function ProfileWizard() {
   const [submitting, setSubmitting] = useState(false);
   const [titleInput, setTitleInput] = useState("");
+  const [companyInput, setCompanyInput] = useState("");
   const { addToast } = useToast();
+
+  const DRAFT_KEY = "profile_draft";
 
   const {
     control,
@@ -25,16 +28,26 @@ export function ProfileWizard() {
     formState: { errors },
   } = useForm<ProfileFormValues>({
     resolver: zodResolver(profileSchema),
-    defaultValues: {
-      jobTitles: [],
-      city: "",
-      workArrangements: ["hybrid"],
-      minSalary: null,
-    },
+    defaultValues: (() => {
+      try {
+        const saved = localStorage.getItem(DRAFT_KEY);
+        if (saved) return JSON.parse(saved);
+      } catch {}
+      return { jobTitles: [], city: "", workArrangements: ["hybrid"], minSalary: null, targetCompanies: [] };
+    })(),
   });
 
-  const jobTitles = watch("jobTitles") ?? [];
+  const jobTitles       = watch("jobTitles") ?? [];
   const workArrangements = watch("workArrangements") ?? [];
+  const targetCompanies = watch("targetCompanies") ?? [];
+
+  // Persist form values to localStorage on every change
+  useEffect(() => {
+    const sub = watch((values) => {
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify(values)); } catch {}
+    });
+    return () => sub.unsubscribe();
+  }, [watch]);
 
   const addTitle = () => {
     const trimmed = titleInput.trim();
@@ -45,6 +58,16 @@ export function ProfileWizard() {
 
   const removeTitle = (t: string) =>
     setValue("jobTitles", jobTitles.filter((x) => x !== t), { shouldValidate: true });
+
+  const addCompany = () => {
+    const trimmed = companyInput.trim();
+    if (!trimmed || targetCompanies.map(c => c.toLowerCase()).includes(trimmed.toLowerCase())) return;
+    setValue("targetCompanies", [...targetCompanies, trimmed], { shouldValidate: true });
+    setCompanyInput("");
+  };
+
+  const removeCompany = (c: string) =>
+    setValue("targetCompanies", targetCompanies.filter((x) => x !== c), { shouldValidate: true });
 
   const toggleArrangement = (val: "remote" | "hybrid" | "onsite") => {
     const updated = workArrangements.includes(val)
@@ -161,6 +184,51 @@ export function ProfileWizard() {
           {errors.workArrangements && (
             <p className="mt-1 text-xs text-red-600">{errors.workArrangements.message}</p>
           )}
+        </div>
+
+        {/* Target Companies */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Target Companies{" "}
+            <span className="text-gray-400 font-normal">(optional — triggers direct company searches)</span>
+          </label>
+          <div className="flex flex-wrap gap-2 mb-2">
+            {targetCompanies.map((c) => (
+              <span
+                key={c}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-violet-100 text-violet-800 text-xs font-medium"
+              >
+                🎯 {c}
+                <button
+                  type="button"
+                  onClick={() => removeCompany(c)}
+                  className="hover:text-violet-600 leading-none"
+                  aria-label={`Remove ${c}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={companyInput}
+              onChange={(e) => setCompanyInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); addCompany(); }
+              }}
+              placeholder="e.g. Google, Microsoft, Stripe"
+              className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+            />
+            <button
+              type="button"
+              onClick={addCompany}
+              className="px-3 py-2 rounded-md bg-violet-600 text-white text-sm font-medium hover:bg-violet-700"
+            >
+              Add
+            </button>
+          </div>
         </div>
 
         {/* Min Salary */}

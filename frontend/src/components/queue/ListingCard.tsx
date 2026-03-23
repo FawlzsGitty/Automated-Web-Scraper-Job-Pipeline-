@@ -116,7 +116,14 @@ export function ListingCard({
               <p className="text-xs text-gray-400 truncate mt-0.5">{listing.source_url}</p>
             )}
           </div>
-          <PlatformBadge platform={listing.source_platform} />
+          <div className="flex items-center gap-1.5 shrink-0">
+            {listing.target_company && (
+              <span className="px-2 py-0.5 rounded text-xs font-semibold bg-violet-100 text-violet-700 whitespace-nowrap">
+                🎯 {listing.target_company}
+              </span>
+            )}
+            <PlatformBadge platform={listing.source_platform} />
+          </div>
         </div>
 
         {/* Meta row */}

@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 HOURLY_TO_ANNUAL = 2080   # standard full-time hours per year
 MAX_ATTEMPTS     = 3      # escalate to NEEDS_REVIEW after this many retries
 
+# Companies that should never appear in the queue regardless of search results
+COMPANY_BLACKLIST: set[str] = {
+    "dataannotation",
+}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -88,50 +93,99 @@ def _listing_hash(title: str, company: str, location: str) -> str:
 
 # ── Core scrape + persist function ───────────────────────────────────────────
 
+def _fetch_raw(
+    search_term: str,
+    location: str,
+    is_remote: bool,
+    label: str,
+) -> list[pd.DataFrame]:
+    """Run a single search term across indeed + linkedin and return raw DataFrames."""
+    parts: list[pd.DataFrame] = []
+    for site in ("indeed", "linkedin"):
+        try:
+            part = jobspy.scrape_jobs(
+                site_name      = site,
+                search_term    = search_term,
+                location       = location,
+                results_wanted = 25,
+                hours_old      = 168,
+                is_remote      = is_remote,
+            )
+            if part is not None and not part.empty:
+                parts.append(part)
+                logger.info("Fetched %d listings (%s) from %s", len(part), label, site)
+        except Exception as exc:
+            logger.warning("Skipping %s / %r due to error: %s", site, search_term, exc)
+    return parts
+
+
 def scrape_and_persist(profile: UserProfile, db: Session) -> int:
     """
     Fetch jobs from Indeed and LinkedIn, normalize, filter against *profile*,
     deduplicate, and insert new listings.
 
+    Runs two pass types:
+      • General — one search per job title (existing behaviour)
+      • Targeted — one search per company × job title, post-filtered by company name
+
     Returns the number of new listings inserted.
     """
-    job_titles = profile.job_titles or []
-    location   = profile.city or ""
+    job_titles       = profile.job_titles or []
+    target_companies = profile.target_companies or []
+    location         = profile.city or ""
+    is_remote_only   = (profile.work_arrangements == ["remote"])
 
     if not job_titles:
         logger.warning("No job titles on profile — skipping scrape.")
         return 0
 
-    # ── 1. Fetch from JobSpy — one query per job title per site ──────────────
-    df_parts: list[pd.DataFrame] = []
+    # ── 1. Fetch ──────────────────────────────────────────────────────────────
+    general_parts:  list[pd.DataFrame] = []
+    targeted_parts: list[pd.DataFrame] = []
 
+    # General searches
     for title in job_titles:
-        for site in ("indeed", "linkedin"):
-            try:
-                part = jobspy.scrape_jobs(
-                    site_name      = site,
-                    search_term    = title,
-                    location       = location,
-                    results_wanted = 25,
-                    hours_old      = 168,  # 7 days
-                    is_remote      = (profile.work_arrangements == ["remote"]),
-                )
-                if part is not None and not part.empty:
-                    df_parts.append(part)
-                    logger.info("Fetched %d listings for %r from %s", len(part), title, site)
-            except Exception as exc:
-                logger.warning("Skipping %s / %r due to error: %s", site, title, exc)
+        general_parts.extend(_fetch_raw(title, location, is_remote_only, f"general:{title}"))
 
-    if not df_parts:
+    # Targeted searches — search "{title} {company}" then post-filter by company
+    for company in target_companies:
+        for title in job_titles:
+            parts = _fetch_raw(
+                f"{title} {company}", location, is_remote_only,
+                f"targeted:{company}:{title}",
+            )
+            for part in parts:
+                # Post-filter: only keep rows where the company column contains
+                # the target company name (case-insensitive substring match)
+                part = part.copy()
+                part.columns = [c.lower() for c in part.columns]
+                mask = part.get("company", pd.Series([""] * len(part))).apply(
+                    lambda v: company.lower() in _safe_str(v).lower()
+                )
+                filtered = part[mask]
+                if not filtered.empty:
+                    filtered = filtered.copy()
+                    filtered["_target_company"] = company
+                    targeted_parts.append(filtered)
+                    logger.info(
+                        "Targeted: kept %d/%d for %r", len(filtered), len(part), company
+                    )
+
+    if not general_parts and not targeted_parts:
         logger.warning("No listings returned from any source.")
         return 0
 
-    df = pd.concat(df_parts, ignore_index=True)
+    # Targeted results are prepended so they win dedup (carry _target_company metadata)
+    all_parts: list[pd.DataFrame] = targeted_parts + general_parts
+    df = pd.concat(all_parts, ignore_index=True)
 
-    # Normalize all column names to lowercase immediately — jobspy may return
-    # either lowercase or uppercase depending on the installed version.
+    # Normalize all column names to lowercase immediately.
     df.columns = [c.lower() for c in df.columns]
     logger.debug("DataFrame columns after fetch: %s", df.columns.tolist())
+
+    # Preserve _target_company before any further processing
+    if "_target_company" not in df.columns:
+        df["_target_company"] = None
 
     # ── 2. Normalize ─────────────────────────────────────────────────────────
     interval_col   = df["interval"] if "interval" in df.columns else pd.Series([""] * len(df))
@@ -185,10 +239,17 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
             df = df[df["is_remote"] == False]
     logger.info("Remote filter %s: %d → %d listings", prefs, before, len(df))
 
-    # ── 4. Drop blank rows and deduplicate ────────────────────────────────────
-    # Rows with no title, company, or location all hash identically — remove them.
+    # ── 4. Drop blank rows, blacklisted companies, and deduplicate ───────────
     blank_hash = _listing_hash("", "", "")
     df = df[df["listing_hash"] != blank_hash]
+
+    df = df[
+        ~df.apply(
+            lambda r: _safe_str(r.get("company")).strip().lower() in COMPANY_BLACKLIST,
+            axis=1,
+        )
+    ]
+
     df = df.drop_duplicates(subset=["listing_hash"])
 
     # ── 5. Deduplicate against DB ─────────────────────────────────────────────
@@ -216,6 +277,9 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
             except Exception:
                 pass
 
+        raw_target = row.get("_target_company")
+        target_co  = _safe_str(raw_target) if raw_target and not pd.isna(raw_target) else None
+
         listing = JobListing(
             source_url      = _safe_str(row.get("job_url")),
             source_platform = _safe_str(row.get("site")),
@@ -231,6 +295,7 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
             listing_hash    = row["listing_hash"],
             posted_at       = posted_at,
             status          = JobStatus.PENDING,
+            target_company  = target_co,
             # careers_url left NULL — populated by Step 04
         )
         try:

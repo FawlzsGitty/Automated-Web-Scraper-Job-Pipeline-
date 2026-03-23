@@ -14,4 +14,5 @@ export interface Listing {
   source_platform: string | null;  // "indeed" | "linkedin" | "zip_recruiter"
   status:          JobStatusValue;
   posted_at:       string | null;
+  target_company:  string | null;  // non-null when found via targeted company search
 }

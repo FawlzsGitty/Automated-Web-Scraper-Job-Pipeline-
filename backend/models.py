@@ -56,6 +56,7 @@ class UserProfile(Base):
     city               = Column(String(200))
     work_arrangements  = Column(JSON, default=list)            # ["remote","hybrid","onsite"]
     min_salary         = Column(Integer)
+    target_companies   = Column(JSON, default=list)            # list[str] — targeted company searches
     created_at         = Column(DateTime, default=datetime.utcnow)
     updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -86,6 +87,7 @@ class JobListing(Base):
     careers_url     = Column(String(1000))           # populated later by Step 04
     source_platform = Column(String(100))            # SITE (indeed / linkedin / …)
     listing_hash    = Column(String(64), unique=True, index=True)
+    target_company  = Column(String(500))            # set when found via targeted search; NULL = general
 
     # Core fields
     title           = Column(String(500), nullable=False)

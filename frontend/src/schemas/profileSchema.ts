@@ -14,6 +14,7 @@ export const profileSchema = z.object({
     .min(0, "Must be positive")
     .optional()
     .nullable(),
+  targetCompanies: z.array(z.string().min(1)).optional().default([]),
 });
 
 export type ProfileFormValues = z.infer<typeof profileSchema>;
