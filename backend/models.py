@@ -57,6 +57,7 @@ class UserProfile(Base):
     work_arrangements  = Column(JSON, default=list)            # ["remote","hybrid","onsite"]
     min_salary         = Column(Integer)
     target_companies   = Column(JSON, default=list)            # list[str] — targeted company searches
+    hours_old          = Column(Integer, default=168)          # 24 = last day, 168 = last week
     created_at         = Column(DateTime, default=datetime.utcnow)
     updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

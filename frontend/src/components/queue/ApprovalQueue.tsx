@@ -32,8 +32,6 @@ export function ApprovalQueue() {
         mutate({ id: focusedId, status: JobStatus.APPROVED });
       } else if (e.key === "s" || e.key === "S") {
         mutate({ id: focusedId, status: JobStatus.SKIPPED });
-      } else if (e.key === "b" || e.key === "B") {
-        mutate({ id: focusedId, status: JobStatus.BOOKMARKED });
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         const next = listings[focusedIndex + 1];

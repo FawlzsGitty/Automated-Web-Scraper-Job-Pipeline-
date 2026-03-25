@@ -98,6 +98,7 @@ def _fetch_raw(
     location: str,
     is_remote: bool,
     label: str,
+    hours_old: int = 168,
 ) -> list[pd.DataFrame]:
     """Run a single search term across indeed + linkedin and return raw DataFrames."""
     parts: list[pd.DataFrame] = []
@@ -108,7 +109,7 @@ def _fetch_raw(
                 search_term    = search_term,
                 location       = location,
                 results_wanted = 25,
-                hours_old      = 168,
+                hours_old      = hours_old,
                 is_remote      = is_remote,
             )
             if part is not None and not part.empty:
@@ -134,10 +135,14 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
     target_companies = profile.target_companies or []
     location         = profile.city or ""
     is_remote_only   = (profile.work_arrangements == ["remote"])
+    hours_old        = profile.hours_old or 168
 
     if not job_titles:
         logger.warning("No job titles on profile — skipping scrape.")
         return 0
+
+    logger.info("Scraping with hours_old=%d (%s)",
+                hours_old, "last 24h" if hours_old == 24 else "last 7 days")
 
     # ── 1. Fetch ──────────────────────────────────────────────────────────────
     general_parts:  list[pd.DataFrame] = []
@@ -145,14 +150,14 @@ def scrape_and_persist(profile: UserProfile, db: Session) -> int:
 
     # General searches
     for title in job_titles:
-        general_parts.extend(_fetch_raw(title, location, is_remote_only, f"general:{title}"))
+        general_parts.extend(_fetch_raw(title, location, is_remote_only, f"general:{title}", hours_old))
 
     # Targeted searches — search "{title} {company}" then post-filter by company
     for company in target_companies:
         for title in job_titles:
             parts = _fetch_raw(
                 f"{title} {company}", location, is_remote_only,
-                f"targeted:{company}:{title}",
+                f"targeted:{company}:{title}", hours_old,
             )
             for part in parts:
                 # Post-filter: only keep rows where the company column contains

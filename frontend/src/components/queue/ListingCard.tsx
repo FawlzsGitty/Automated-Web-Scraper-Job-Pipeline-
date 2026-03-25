@@ -173,22 +173,13 @@ export function ListingCard({
           >
             Skip
           </button>
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onAction(JobStatus.BOOKMARKED); }}
-            className="px-3 py-1.5 rounded-md bg-amber-50 text-amber-700 text-xs font-medium hover:bg-amber-100 transition-colors"
-          >
-            Bookmark
-          </button>
-
         </div>
 
         {/* Keyboard hint — only shown on focused card */}
         {isFocused && (
           <p className="mt-2 text-xs text-gray-400">
             <kbd className="font-mono bg-gray-100 px-1 rounded">A</kbd> approve ·{" "}
-            <kbd className="font-mono bg-gray-100 px-1 rounded">S</kbd> skip ·{" "}
-            <kbd className="font-mono bg-gray-100 px-1 rounded">B</kbd> bookmark
+            <kbd className="font-mono bg-gray-100 px-1 rounded">S</kbd> skip
           </p>
         )}
       </div>

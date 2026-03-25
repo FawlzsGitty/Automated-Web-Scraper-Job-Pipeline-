@@ -15,6 +15,7 @@ export const profileSchema = z.object({
     .optional()
     .nullable(),
   targetCompanies: z.array(z.string().min(1)).optional().default([]),
+  hoursOld: z.union([z.literal(24), z.literal(168)]).default(168),
 });
 
 export type ProfileFormValues = z.infer<typeof profileSchema>;

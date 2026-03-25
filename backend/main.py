@@ -91,6 +91,7 @@ class ProfileIn(BaseModel):
     workArrangements:   List[str]           = Field(default=["hybrid"])
     minSalary:          Optional[int]       = None
     targetCompanies:    List[str]           = Field(default_factory=list)
+    hoursOld:           int                 = 168  # 24 = last day, 168 = last week
 
 
 class ProfileOut(BaseModel):
@@ -157,6 +158,7 @@ def create_or_update_profile(data: ProfileIn, db: Session = Depends(get_db)):
             work_arrangements = data.workArrangements,
             min_salary        = data.minSalary,
             target_companies  = data.targetCompanies,
+            hours_old         = data.hoursOld,
         )
         db.add(profile)
 
@@ -375,6 +377,7 @@ def _profile_to_out(p: UserProfile) -> dict:
         "workArrangements": p.work_arrangements or [],
         "minSalary":        p.min_salary,
         "targetCompanies":  p.target_companies or [],
+        "hoursOld":         p.hours_old or 168,
     }
 
 
